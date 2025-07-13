@@ -984,7 +984,7 @@ func (g Groups) Contains(group *Group) error {
 	return fmt.Errorf(`Group %q is not defined in the Policy, please define or remove the reference to it`, group)
 }
 
-// UnmarshalJSON overrides the default JSON unmarshalling for Groups to ensure
+// UnmarshalJSON overrides the default JSON unmarshaling for Groups to ensure
 // that each group name is validated using the isGroup function. This ensures
 // that all group names conform to the expected format, which is always prefixed
 // with "group:". If any group name is invalid, an error is returned.
@@ -1263,6 +1263,7 @@ type Policy struct {
 	ACLs          []ACL              `json:"acls,omitempty"`
 	AutoApprovers AutoApproverPolicy `json:"autoApprovers,omitempty"`
 	SSHs          []SSH              `json:"ssh,omitempty"`
+	NodeAttrs     []NodeAttr         `json:"nodeAttrs,omitempty"`
 }
 
 // MarshalJSON is deliberately not implemented for Policy.
@@ -1548,6 +1549,13 @@ func (p *Policy) validate() error {
 		}
 	}
 
+	// Validate nodeAttrs configurations
+	for i, nodeAttr := range p.NodeAttrs {
+		if err := nodeAttr.validate(p); err != nil {
+			errs = append(errs, fmt.Errorf("nodeAttrs[%d]: %w", i, err))
+		}
+	}
+
 	if len(errs) > 0 {
 		return multierr.New(errs...)
 	}
@@ -1724,6 +1732,220 @@ func (u SSHUser) String() string {
 // MarshalJSON marshals the SSHUser to JSON.
 func (u SSHUser) MarshalJSON() ([]byte, error) {
 	return json.Marshal(string(u))
+}
+
+// NodeAttr represents a node attribute configuration that can assign
+// application-specific configurations to nodes based on target patterns.
+type NodeAttr struct {
+	Target NodeAttrTargets `json:"target"`
+	App    NodeAttrApps    `json:"app"`
+}
+
+// NodeAttrTarget represents a target pattern for node attributes.
+// It can be a wildcard (*), a tag, a group, or a username.
+type NodeAttrTarget interface {
+	String() string
+	Validate() error
+}
+
+// NodeAttrTargets is a slice of NodeAttrTarget with custom JSON marshaling.
+type NodeAttrTargets []NodeAttrTarget
+
+// UnmarshalJSON implements custom JSON unmarshaling for NodeAttrTargets.
+func (nats *NodeAttrTargets) UnmarshalJSON(b []byte) error {
+	var rawTargets []string
+	if err := json.Unmarshal(b, &rawTargets); err != nil {
+		return fmt.Errorf("nodeAttr targets must be an array of strings: %w", err)
+	}
+
+	targets := make([]NodeAttrTarget, len(rawTargets))
+	for i, s := range rawTargets {
+		switch {
+		case s == "*":
+			targets[i] = Wildcard
+		case strings.HasPrefix(s, "tag:"):
+			tag := Tag(s)
+			targets[i] = &tag
+		case strings.HasPrefix(s, "group:"):
+			group := Group(s)
+			targets[i] = &group
+		case strings.Contains(s, "@"):
+			username := Username(s)
+			targets[i] = &username
+		default:
+			return fmt.Errorf("invalid nodeAttr target format: %q", s)
+		}
+	}
+
+	*nats = targets
+	return nil
+}
+
+// MarshalJSON implements custom JSON marshaling for NodeAttrTargets.
+func (nats NodeAttrTargets) MarshalJSON() ([]byte, error) {
+	strs := make([]string, len(nats))
+	for i, target := range nats {
+		if target == nil {
+			strs[i] = ""
+		} else {
+			strs[i] = target.String()
+		}
+	}
+	return json.Marshal(strs)
+}
+
+// NodeAttrApps represents the application configurations within a nodeAttr.
+// Currently supports Tailscale app connectors configuration.
+type NodeAttrApps struct {
+	AppConnectors []AppConnector `json:"tailscale.com/app-connectors,omitempty"`
+}
+
+// AppConnector represents a Tailscale app connector configuration.
+type AppConnector struct {
+	Name       string                 `json:"name"`
+	Connectors AppConnectorConnectors `json:"connectors"`
+	Domains    []string               `json:"domains"`
+}
+
+// AppConnectorConnector represents a connector pattern for an app connector.
+// It can only be a tag.
+type AppConnectorConnector interface {
+	String() string
+	Validate() error
+}
+
+// AppConnectorConnectors is a slice of AppConnectorConnector with custom JSON marshaling.
+type AppConnectorConnectors []AppConnectorConnector
+
+// UnmarshalJSON implements custom JSON unmarshaling for AppConnectorConnectors.
+func (accs *AppConnectorConnectors) UnmarshalJSON(b []byte) error {
+	var rawConnectors []string
+	if err := json.Unmarshal(b, &rawConnectors); err != nil {
+		return fmt.Errorf("app connector connectors must be an array of strings: %w", err)
+	}
+
+	targets := make([]AppConnectorConnector, len(rawConnectors))
+	for i, s := range rawConnectors {
+		switch {
+		case strings.HasPrefix(s, "tag:"):
+			tag := Tag(s)
+			targets[i] = &tag
+		default:
+			return fmt.Errorf("invalid app connector connector format: %q", s)
+		}
+	}
+
+	*accs = targets
+	return nil
+}
+
+// MarshalJSON implements custom JSON marshaling for AppConnectorConnectors.
+func (accs AppConnectorConnectors) MarshalJSON() ([]byte, error) {
+	strs := make([]string, len(accs))
+	for i, target := range accs {
+		if target == nil {
+			strs[i] = ""
+		} else {
+			strs[i] = target.String()
+		}
+	}
+	return json.Marshal(strs)
+}
+
+// validate validates a NodeAttr configuration.
+func (na *NodeAttr) validate(pol *Policy) error {
+	var errs []error
+
+	// Validate targets
+	for _, target := range na.Target {
+		if err := target.Validate(); err != nil {
+			errs = append(errs, fmt.Errorf("invalid target: %w", err))
+			continue
+		}
+
+		// Validate that referenced groups and tags exist
+		switch t := target.(type) {
+		case *Group:
+			if err := pol.Groups.Contains(t); err != nil {
+				errs = append(errs, fmt.Errorf("target references undefined group: %w", err))
+			}
+		case *Tag:
+			if err := pol.TagOwners.Contains(t); err != nil {
+				errs = append(errs, fmt.Errorf("target references undefined tag: %w", err))
+			}
+		}
+	}
+
+	// Validate app connector configurations
+	for _, appConn := range na.App.AppConnectors {
+		if err := appConn.validate(pol); err != nil {
+			errs = append(errs, fmt.Errorf("invalid app connector %q: %w", appConn.Name, err))
+		}
+	}
+
+	if len(errs) > 0 {
+		return multierr.New(errs...)
+	}
+
+	return nil
+}
+
+// validate validates an AppConnector configuration.
+func (ac *AppConnector) validate(pol *Policy) error {
+	var errs []error
+
+	// Validate name
+	if ac.Name == "" {
+		errs = append(errs, fmt.Errorf("app connector name cannot be empty"))
+	}
+
+	// Validate that we have at least one connector
+	if len(ac.Connectors) == 0 {
+		errs = append(errs, fmt.Errorf("app connector must have at least one connector tag"))
+	} else {
+		// Validate each connector
+		for _, connector := range ac.Connectors {
+			// Validate the connector format first (this will check tag format)
+			if err := connector.Validate(); err != nil {
+				errs = append(errs, fmt.Errorf("invalid connector: %w", err))
+				continue // Don't do further validation if format is wrong
+			}
+
+			// For tags, check if they are defined in the policy
+			if tag, ok := connector.(*Tag); ok {
+				if err := pol.TagOwners.Contains(tag); err != nil {
+					errs = append(errs, fmt.Errorf("connector references undefined tag: %w", err))
+				}
+			}
+		}
+	}
+
+	// Validate domains
+	if len(ac.Domains) == 0 {
+		errs = append(errs, fmt.Errorf("app connector must have at least one domain"))
+	} else {
+		for _, domain := range ac.Domains {
+			if domain == "" {
+				errs = append(errs, fmt.Errorf("domain cannot be empty"))
+			}
+			// Add domain format validation
+			if strings.Contains(domain, " ") {
+				errs = append(errs, fmt.Errorf("domain %q cannot contain spaces", domain))
+			}
+			// Add wildcard validation - only allow wildcards at the beginning
+			if strings.Contains(domain, "*") {
+				if !strings.HasPrefix(domain, "*.") || strings.Count(domain, "*") > 1 {
+					errs = append(errs, fmt.Errorf("domain %q has invalid wildcard usage", domain))
+				}
+			}
+		}
+	}
+
+	if len(errs) > 0 {
+		return multierr.New(errs...)
+	}
+
+	return nil
 }
 
 // unmarshalPolicy takes a byte slice and unmarshals it into a Policy struct.
