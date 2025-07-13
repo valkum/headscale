@@ -2,7 +2,7 @@ name: integration
 # To debug locally on a branch, and when needing secrets
 # change this to include `push` so the build is ran on
 # the main repository.
-on: [pull_request]
+on: [pull_request,push]
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
