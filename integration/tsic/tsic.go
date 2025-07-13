@@ -87,6 +87,7 @@ type TailscaleInContainer struct {
 	netfilter         string
 	extraLoginArgs    []string
 	withAcceptRoutes  bool
+	withConnector     bool
 
 	// build options, solely for HEAD
 	buildConfig TailscaleInContainerBuildConfig
@@ -206,6 +207,13 @@ func WithExtraLoginArgs(args []string) Option {
 func WithAcceptRoutes() Option {
 	return func(tsic *TailscaleInContainer) {
 		tsic.withAcceptRoutes = true
+	}
+}
+
+// WithConnector tells the node to advertise itself as an app connector for the given domains.
+func WithConnector(domains []string) Option {
+	return func(tsic *TailscaleInContainer) {
+		tsic.withConnector = true
 	}
 }
 
@@ -463,6 +471,12 @@ func (t *TailscaleInContainer) buildLoginCommand(
 	if len(t.withTags) > 0 {
 		command = append(command,
 			"--advertise-tags="+strings.Join(t.withTags, ","),
+		)
+	}
+
+	if t.withConnector {
+		command = append(command,
+			"--advertise-connector",
 		)
 	}
 

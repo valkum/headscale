@@ -754,6 +754,12 @@ func (api headscaleV1APIServer) SetPolicy(
 			return nil, err
 		}
 
+		// Update app connector configuration with new policy
+		err = api.h.updateAppConnectorConfiguration()
+		if err != nil {
+			log.Error().Err(err).Msg("failed to update app connector configuration after policy update")
+		}
+
 		ctx := types.NotifyCtx(context.Background(), "acl-update", "na")
 		api.h.nodeNotifier.NotifyAll(ctx, types.UpdateFull())
 	}

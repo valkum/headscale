@@ -23,6 +23,9 @@ jobs:
           - TestPolicyUpdateWhileRunningWithCLIInDatabase
           - TestACLAutogroupMember
           - TestACLAutogroupTagged
+          - TestAppConnectorBasic
+          - TestAppConnectorPolicyValidation
+          - TestAppConnectorMultipleDomains
           - TestAuthKeyLogoutAndReloginSameUser
           - TestAuthKeyLogoutAndReloginNewUser
           - TestAuthKeyLogoutAndReloginSameUserExpiredKey

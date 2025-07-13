@@ -22,6 +22,7 @@ import (
 	grpcRuntime "github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"github.com/juanfont/headscale"
 	v1 "github.com/juanfont/headscale/gen/go/headscale/v1"
+	"github.com/juanfont/headscale/hscontrol/appconnector"
 	"github.com/juanfont/headscale/hscontrol/capver"
 	"github.com/juanfont/headscale/hscontrol/db"
 	"github.com/juanfont/headscale/hscontrol/derp"
@@ -29,6 +30,7 @@ import (
 	"github.com/juanfont/headscale/hscontrol/dns"
 	"github.com/juanfont/headscale/hscontrol/mapper"
 	"github.com/juanfont/headscale/hscontrol/notifier"
+	v2 "github.com/juanfont/headscale/hscontrol/policy/v2"
 	"github.com/juanfont/headscale/hscontrol/state"
 	"github.com/juanfont/headscale/hscontrol/types"
 	"github.com/juanfont/headscale/hscontrol/util"
@@ -81,10 +83,11 @@ type Headscale struct {
 	DERPServer *derpServer.DERPServer
 
 	// Things that generate changes
-	extraRecordMan *dns.ExtraRecordsMan
-	mapper         *mapper.Mapper
-	nodeNotifier   *notifier.Notifier
-	authProvider   AuthProvider
+	extraRecordMan  *dns.ExtraRecordsMan
+	mapper          *mapper.Mapper
+	nodeNotifier    *notifier.Notifier
+	authProvider    AuthProvider
+	appConnectorMan *appconnector.Manager
 
 	pollNetMapStreamWG sync.WaitGroup
 }
@@ -121,6 +124,18 @@ func NewHeadscale(cfg *types.Config) (*Headscale, error) {
 		nodeNotifier:       notifier.NewNotifier(cfg),
 		state:              s,
 	}
+
+	// Initialize app connector manager
+	app.appConnectorMan = appconnector.NewManager(app.nodeNotifier)
+
+	// Set up DNS update callback for app connectors
+	app.appConnectorMan.SetDNSUpdateCallback(func() {
+		log.Debug().Msg("App connector configuration changed, triggering DNS update")
+		// TODO: Integrate with actual DNS update mechanism when implemented
+		// For now, just trigger a full network map update
+		ctx := types.NotifyCtx(context.Background(), "appconnector-dns-update", "all")
+		app.nodeNotifier.NotifyAll(ctx, types.UpdateFull())
+	})
 
 	// Initialize ephemeral garbage collector
 	ephemeralGC := db.NewEphemeralGarbageCollector(func(ni types.NodeID) {
@@ -838,6 +853,12 @@ func (h *Headscale) Serve() error {
 					log.Info().
 						Msg("ACL policy successfully reloaded, notifying nodes of change")
 
+					// Update app connector configuration with new policy
+					err = h.updateAppConnectorConfiguration()
+					if err != nil {
+						log.Error().Err(err).Msg("failed to update app connector configuration after policy reload")
+					}
+
 					ctx := types.NotifyCtx(context.Background(), "acl-sighup", "na")
 					h.nodeNotifier.NotifyAll(ctx, types.UpdateFull())
 				}
@@ -924,8 +945,7 @@ func (h *Headscale) getTLSSettings() (*tls.Config, error) {
 	var err error
 	if h.cfg.TLS.LetsEncrypt.Hostname != "" {
 		if !strings.HasPrefix(h.cfg.ServerURL, "https://") {
-			log.Warn().
-				Msg("Listening with TLS but ServerURL does not start with https://")
+			log.Warn().Msg("Listening with TLS but ServerURL does not start with https://")
 		}
 
 		certManager := autocert.Manager{
@@ -1046,4 +1066,36 @@ func readOrCreatePrivateKey(path string) (*key.MachinePrivate, error) {
 	}
 
 	return &machineKey, nil
+}
+
+// updateAppConnectorConfiguration updates the app connector manager with current policy and state.
+// This method should be called whenever the policy, users, or nodes change.
+func (h *Headscale) updateAppConnectorConfiguration() error {
+	if h.appConnectorMan == nil {
+		return nil // App connector manager not initialized
+	}
+
+	// For now, pass nil policy until we have GetPolicy() method in PolicyManager
+	// The app connector manager will handle nil policy gracefully
+	var policy *v2.Policy = nil
+
+	// Get current users
+	users, err := h.state.ListAllUsers()
+	if err != nil {
+		return fmt.Errorf("failed to get users for app connector update: %w", err)
+	}
+
+	// Get current nodes
+	nodes, err := h.state.ListNodes()
+	if err != nil {
+		return fmt.Errorf("failed to get nodes for app connector update: %w", err)
+	}
+
+	// Update the app connector manager
+	err = h.appConnectorMan.UpdateConfiguration(policy, users, nodes.ViewSlice())
+	if err != nil {
+		return fmt.Errorf("failed to update app connector configuration: %w", err)
+	}
+
+	return nil
 }
