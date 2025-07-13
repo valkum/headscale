@@ -492,18 +492,27 @@ func tagApprover(name string) policyv2.AutoApprover {
 	return ptr.To(policyv2.Tag(name))
 }
 
-//
-// // findPeerByHostname takes a hostname and a map of peers from status.Peer, and returns a *ipnstate.PeerStatus
-// // if there is a peer with the given hostname. If no peer is found, nil is returned.
-// func findPeerByHostname(
-// 	hostname string,
-// 	peers map[key.NodePublic]*ipnstate.PeerStatus,
-// ) *ipnstate.PeerStatus {
-// 	for _, peer := range peers {
-// 		if hostname == peer.HostName {
-// 			return peer
-// 		}
-// 	}
-//
-// 	return nil
-// }
+// Helper functions for creating NodeAttrTarget entities
+
+// nodeAttrWildcard returns a wildcard as a NodeAttrTarget.
+func nodeAttrWildcard() policyv2.NodeAttrTarget {
+	return policyv2.Wildcard
+}
+
+// nodeAttrTag returns a Tag as a NodeAttrTarget.
+func nodeAttrTag(name string) policyv2.NodeAttrTarget {
+	tag := policyv2.Tag(name)
+	return &tag
+}
+
+// nodeAttrGroup returns a Group as a NodeAttrTarget.
+func nodeAttrGroup(name string) policyv2.NodeAttrTarget {
+	group := policyv2.Group(name)
+	return &group
+}
+
+// nodeAttrUsername returns a Username as a NodeAttrTarget.
+func nodeAttrUsername(name string) policyv2.NodeAttrTarget {
+	username := policyv2.Username(name)
+	return &username
+}

@@ -1927,3 +1927,607 @@ func TestNodeCanHaveTag(t *testing.T) {
 		})
 	}
 }
+
+// TestNodeAttrsUnmarshalJSON tests that nodeAttrs can be correctly unmarshalled from JSON.
+func TestNodeAttrsUnmarshalJSON(t *testing.T) {
+	tests := []struct {
+		name     string
+		json     string
+		expected []NodeAttr
+		wantErr  bool
+	}{
+		{
+			name: "valid_app_connectors",
+			json: `{
+				"nodeAttrs": [
+					{
+						"target": ["*"],
+						"app": {
+							"tailscale.com/app-connectors": [
+								{
+									"name": "homelab-services",
+									"connectors": ["tag:homelab-connector"],
+									"domains": ["grafana.home.local", "nextcloud.home.local"]
+								}
+							]
+						}
+					}
+				]
+			}`,
+			expected: []NodeAttr{
+				{
+					Target: NodeAttrTargets{Wildcard},
+					App: NodeAttrApps{
+						AppConnectors: []AppConnector{
+							{
+								Name:       "homelab-services",
+								Connectors: AppConnectorConnectors{ptr.To(Tag("tag:homelab-connector"))},
+								Domains:    []string{"grafana.home.local", "nextcloud.home.local"},
+							},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "multiple_targets",
+			json: `{
+				"nodeAttrs": [
+					{
+						"target": ["tag:app-connector", "group:admins", "user@example.com"],
+						"app": {
+							"tailscale.com/app-connectors": [
+								{
+									"name": "web-services",
+									"connectors": ["tag:web-connector"],
+									"domains": ["*.dev.example.com"]
+								}
+							]
+						}
+					}
+				]
+			}`,
+			expected: []NodeAttr{
+				{
+					Target: NodeAttrTargets{
+						ptr.To(Tag("tag:app-connector")),
+						ptr.To(Group("group:admins")),
+						ptr.To(Username("user@example.com")),
+					},
+					App: NodeAttrApps{
+						AppConnectors: []AppConnector{
+							{
+								Name:       "web-services",
+								Connectors: AppConnectorConnectors{ptr.To(Tag("tag:web-connector"))},
+								Domains:    []string{"*.dev.example.com"},
+							},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "invalid_target_format",
+			json: `{
+				"nodeAttrs": [
+					{
+						"target": ["invalid-target"],
+						"app": {
+							"tailscale.com/app-connectors": []
+						}
+					}
+				]
+			}`,
+			wantErr: true,
+		},
+		{
+			name: "empty_nodeAttrs",
+			json: `{
+				"nodeAttrs": []
+			}`,
+			expected: []NodeAttr{},
+			wantErr:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var policy Policy
+			err := json.Unmarshal([]byte(tt.json), &policy)
+
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected, policy.NodeAttrs)
+		})
+	}
+}
+
+// TestNodeAttrsMarshalJSON tests that nodeAttrs can be correctly marshalled to JSON.
+func TestNodeAttrsMarshalJSON(t *testing.T) {
+	policy := Policy{
+		NodeAttrs: []NodeAttr{
+			{
+				Target: NodeAttrTargets{
+					Wildcard,
+					ptr.To(Tag("tag:test")),
+				},
+				App: NodeAttrApps{
+					AppConnectors: []AppConnector{
+						{
+							Name:       "test-service",
+							Connectors: AppConnectorConnectors{ptr.To(Tag("tag:connector"))},
+							Domains:    []string{"test.local", "*.dev.local"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	jsonData, err := json.MarshalIndent(&policy, "", "  ")
+	require.NoError(t, err)
+
+	jsonStr := string(jsonData)
+	assert.Contains(t, jsonStr, `"nodeAttrs"`)
+	assert.Contains(t, jsonStr, `"target"`)
+	assert.Contains(t, jsonStr, `"*"`)
+	assert.Contains(t, jsonStr, `"tag:test"`)
+	assert.Contains(t, jsonStr, `"tailscale.com/app-connectors"`)
+	assert.Contains(t, jsonStr, `"test-service"`)
+	assert.Contains(t, jsonStr, `"tag:connector"`)
+	assert.Contains(t, jsonStr, `"test.local"`)
+	assert.Contains(t, jsonStr, `"*.dev.local"`)
+
+	// Test round-trip
+	var roundTripped Policy
+	err = json.Unmarshal(jsonData, &roundTripped)
+	require.NoError(t, err)
+
+	assert.Equal(t, policy.NodeAttrs, roundTripped.NodeAttrs)
+}
+
+// TestNodeAttrsValidation tests the validation logic for nodeAttrs.
+func TestNodeAttrsValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		policy  Policy
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name: "valid_nodeAttrs",
+			policy: Policy{
+				Groups: Groups{
+					Group("group:admins"): []Username{Username("admin@example.com")},
+				},
+				TagOwners: TagOwners{
+					Tag("tag:connector"): Owners{ptr.To(Username("admin@example.com"))},
+				},
+				NodeAttrs: []NodeAttr{
+					{
+						Target: NodeAttrTargets{Wildcard},
+						App: NodeAttrApps{
+							AppConnectors: []AppConnector{
+								{
+									Name:       "test-service",
+									Connectors: AppConnectorConnectors{ptr.To(Tag("tag:connector"))},
+									Domains:    []string{"test.local"},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "undefined_tag_reference",
+			policy: Policy{
+				NodeAttrs: []NodeAttr{
+					{
+						Target: NodeAttrTargets{ptr.To(Tag("tag:undefined"))},
+						App: NodeAttrApps{
+							AppConnectors: []AppConnector{
+								{
+									Name:       "test-service",
+									Connectors: AppConnectorConnectors{ptr.To(Tag("tag:connector"))},
+									Domains:    []string{"test.local"},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "target references undefined tag",
+		},
+		{
+			name: "undefined_group_reference",
+			policy: Policy{
+				NodeAttrs: []NodeAttr{
+					{
+						Target: NodeAttrTargets{ptr.To(Group("group:undefined"))},
+						App: NodeAttrApps{
+							AppConnectors: []AppConnector{
+								{
+									Name:       "test-service",
+									Connectors: AppConnectorConnectors{ptr.To(Tag("tag:connector"))},
+									Domains:    []string{"test.local"},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "target references undefined group",
+		},
+		{
+			name: "empty_app_connector_name",
+			policy: Policy{
+				NodeAttrs: []NodeAttr{
+					{
+						Target: NodeAttrTargets{Wildcard},
+						App: NodeAttrApps{
+							AppConnectors: []AppConnector{
+								{
+									Name:       "",
+									Connectors: AppConnectorConnectors{ptr.To(Tag("tag:connector"))},
+									Domains:    []string{"test.local"},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "app connector name cannot be empty",
+		},
+		{
+			name: "no_connectors",
+			policy: Policy{
+				NodeAttrs: []NodeAttr{
+					{
+						Target: NodeAttrTargets{Wildcard},
+						App: NodeAttrApps{
+							AppConnectors: []AppConnector{
+								{
+									Name:       "test-service",
+									Connectors: AppConnectorConnectors{},
+									Domains:    []string{"test.local"},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "app connector must have at least one connector tag",
+		},
+		{
+			name: "invalid_connector_not_tag",
+			policy: Policy{
+				NodeAttrs: []NodeAttr{
+					{
+						Target: NodeAttrTargets{Wildcard},
+						App: NodeAttrApps{
+							AppConnectors: []AppConnector{
+								{
+									Name:       "test-service",
+									Connectors: AppConnectorConnectors{ptr.To(Tag("not-a-tag"))},
+									Domains:    []string{"test.local"},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "invalid connector: tag has to start with \"tag:\"",
+		},
+		{
+			name: "undefined_connector_tag",
+			policy: Policy{
+				NodeAttrs: []NodeAttr{
+					{
+						Target: NodeAttrTargets{Wildcard},
+						App: NodeAttrApps{
+							AppConnectors: []AppConnector{
+								{
+									Name:       "test-service",
+									Connectors: AppConnectorConnectors{ptr.To(Tag("tag:undefined"))},
+									Domains:    []string{"test.local"},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "connector references undefined tag",
+		},
+		{
+			name: "no_domains",
+			policy: Policy{
+				TagOwners: TagOwners{
+					Tag("tag:connector"): Owners{ptr.To(Username("admin@example.com"))},
+				},
+				NodeAttrs: []NodeAttr{
+					{
+						Target: NodeAttrTargets{Wildcard},
+						App: NodeAttrApps{
+							AppConnectors: []AppConnector{
+								{
+									Name:       "test-service",
+									Connectors: AppConnectorConnectors{ptr.To(Tag("tag:connector"))},
+									Domains:    []string{},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "app connector must have at least one domain",
+		},
+		{
+			name: "empty_domain",
+			policy: Policy{
+				TagOwners: TagOwners{
+					Tag("tag:connector"): Owners{ptr.To(Username("admin@example.com"))},
+				},
+				NodeAttrs: []NodeAttr{
+					{
+						Target: NodeAttrTargets{Wildcard},
+						App: NodeAttrApps{
+							AppConnectors: []AppConnector{
+								{
+									Name:       "test-service",
+									Connectors: AppConnectorConnectors{ptr.To(Tag("tag:connector"))},
+									Domains:    []string{""},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "domain cannot be empty",
+		},
+		{
+			name: "domain_with_spaces",
+			policy: Policy{
+				TagOwners: TagOwners{
+					Tag("tag:connector"): Owners{ptr.To(Username("admin@example.com"))},
+				},
+				NodeAttrs: []NodeAttr{
+					{
+						Target: NodeAttrTargets{Wildcard},
+						App: NodeAttrApps{
+							AppConnectors: []AppConnector{
+								{
+									Name:       "test-service",
+									Connectors: AppConnectorConnectors{ptr.To(Tag("tag:connector"))},
+									Domains:    []string{"test domain.local"},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "domain \"test domain.local\" cannot contain spaces",
+		},
+		{
+			name: "invalid_wildcard_usage",
+			policy: Policy{
+				TagOwners: TagOwners{
+					Tag("tag:connector"): Owners{ptr.To(Username("admin@example.com"))},
+				},
+				NodeAttrs: []NodeAttr{
+					{
+						Target: NodeAttrTargets{Wildcard},
+						App: NodeAttrApps{
+							AppConnectors: []AppConnector{
+								{
+									Name:       "test-service",
+									Connectors: AppConnectorConnectors{ptr.To(Tag("tag:connector"))},
+									Domains:    []string{"test*.local"},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "domain \"test*.local\" has invalid wildcard usage",
+		},
+		{
+			name: "valid_wildcard_usage",
+			policy: Policy{
+				TagOwners: TagOwners{
+					Tag("tag:connector"): Owners{ptr.To(Username("admin@example.com"))},
+				},
+				NodeAttrs: []NodeAttr{
+					{
+						Target: NodeAttrTargets{Wildcard},
+						App: NodeAttrApps{
+							AppConnectors: []AppConnector{
+								{
+									Name:       "test-service",
+									Connectors: AppConnectorConnectors{ptr.To(Tag("tag:connector"))},
+									Domains:    []string{"*.dev.local"},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.policy.validate()
+
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.errMsg)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestNodeAttrsTargetsUnmarshalJSON tests that NodeAttrTargets can handle various target formats.
+func TestNodeAttrsTargetsUnmarshalJSON(t *testing.T) {
+	tests := []struct {
+		name     string
+		json     string
+		expected NodeAttrTargets
+		wantErr  bool
+	}{
+		{
+			name:     "wildcard",
+			json:     `["*"]`,
+			expected: NodeAttrTargets{Wildcard},
+			wantErr:  false,
+		},
+		{
+			name:     "tag",
+			json:     `["tag:test"]`,
+			expected: NodeAttrTargets{ptr.To(Tag("tag:test"))},
+			wantErr:  false,
+		},
+		{
+			name:     "group",
+			json:     `["group:admins"]`,
+			expected: NodeAttrTargets{ptr.To(Group("group:admins"))},
+			wantErr:  false,
+		},
+		{
+			name:     "username",
+			json:     `["user@example.com"]`,
+			expected: NodeAttrTargets{ptr.To(Username("user@example.com"))},
+			wantErr:  false,
+		},
+		{
+			name: "mixed_targets",
+			json: `["*", "tag:test", "group:admins", "user@example.com"]`,
+			expected: NodeAttrTargets{
+				Wildcard,
+				ptr.To(Tag("tag:test")),
+				ptr.To(Group("group:admins")),
+				ptr.To(Username("user@example.com")),
+			},
+			wantErr: false,
+		},
+		{
+			name:    "invalid_format",
+			json:    `["invalid-format"]`,
+			wantErr: true,
+		},
+		{
+			name:    "not_array",
+			json:    `"*"`,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var targets NodeAttrTargets
+			err := json.Unmarshal([]byte(tt.json), &targets)
+
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected, targets)
+		})
+	}
+}
+
+// TestNodeAttrsIntegration tests full integration with policy parsing.
+func TestNodeAttrsIntegration(t *testing.T) {
+	policyJSON := `{
+		"groups": {
+			"group:admins": ["admin@example.com"]
+		},
+		"tagOwners": {
+			"tag:app-connector": ["group:admins"],
+			"tag:web-connector": ["group:admins"]
+		},
+		"nodeAttrs": [
+			{
+				"target": ["*"],
+				"app": {
+					"tailscale.com/app-connectors": [
+						{
+							"name": "homelab-services",
+							"connectors": ["tag:app-connector"],
+							"domains": ["grafana.home.local", "nextcloud.home.local"]
+						}
+					]
+				}
+			},
+			{
+				"target": ["tag:web-connector"],
+				"app": {
+					"tailscale.com/app-connectors": [
+						{
+							"name": "web-services",
+							"connectors": ["tag:web-connector"],
+							"domains": ["*.dev.example.com"]
+						}
+					]
+				}
+			}
+		]
+	}`
+
+	policy, err := unmarshalPolicy([]byte(policyJSON))
+	require.NoError(t, err)
+	require.NotNil(t, policy)
+
+	// Verify the nodeAttrs were parsed correctly
+	require.Len(t, policy.NodeAttrs, 2)
+
+	// Check first nodeAttr
+	assert.Len(t, policy.NodeAttrs[0].Target, 1)
+	assert.Equal(t, Wildcard, policy.NodeAttrs[0].Target[0])
+	assert.Len(t, policy.NodeAttrs[0].App.AppConnectors, 1)
+	assert.Equal(t, "homelab-services", policy.NodeAttrs[0].App.AppConnectors[0].Name)
+	assert.Len(t, policy.NodeAttrs[0].App.AppConnectors[0].Connectors, 1)
+	assert.Equal(t, ptr.To(Tag("tag:app-connector")), policy.NodeAttrs[0].App.AppConnectors[0].Connectors[0])
+	assert.Equal(t, []string{"grafana.home.local", "nextcloud.home.local"}, policy.NodeAttrs[0].App.AppConnectors[0].Domains)
+
+	// Check second nodeAttr
+	assert.Len(t, policy.NodeAttrs[1].Target, 1)
+	assert.Equal(t, ptr.To(Tag("tag:web-connector")), policy.NodeAttrs[1].Target[0])
+	assert.Len(t, policy.NodeAttrs[1].App.AppConnectors, 1)
+	assert.Equal(t, "web-services", policy.NodeAttrs[1].App.AppConnectors[0].Name)
+	assert.Len(t, policy.NodeAttrs[1].App.AppConnectors[0].Connectors, 1)
+	assert.Equal(t, ptr.To(Tag("tag:web-connector")), policy.NodeAttrs[1].App.AppConnectors[0].Connectors[0])
+	assert.Equal(t, []string{"*.dev.example.com"}, policy.NodeAttrs[1].App.AppConnectors[0].Domains)
+
+	// Test round-trip JSON serialization
+	marshalled, err := json.MarshalIndent(policy, "", "  ")
+	require.NoError(t, err)
+
+	var roundTripped Policy
+	err = json.Unmarshal(marshalled, &roundTripped)
+	require.NoError(t, err)
+
+	assert.Equal(t, policy.NodeAttrs, roundTripped.NodeAttrs)
+}
